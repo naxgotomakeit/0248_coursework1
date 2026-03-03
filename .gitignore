@@ -1,0 +1,15 @@
+# 忽略数据集
+dataset/
+test_root/
+test_clip15_root/
+
+# # 忽略权重和结果图表
+# weights/
+# weights_reweight/
+# results/
+# *.pth
+
+# 忽略缓存和垃圾文件
+__pycache__/
+*.zip
+*.npy
