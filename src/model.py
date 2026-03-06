@@ -13,8 +13,8 @@ Architecture overview:
                           ┌─────────────────────────┼──────────────────────┐
                           ▼                         ▼                      ▼
                   Detection Head            Segmentation Head       Classification Head
-                  (bbox regression)         (U-Net decoder          (conv + pool + FC)
-                  → (4,) [x1,y1,x2,y2]      with RGB+Depth skips)   → (10,) logits
+                  (bbox regression)         (U-Net decoder          (GAP + FC)
+                  → (4,) [x1,y1,x2,y2]      with skip conns)        → (10,) logits
                                             → (1, H, W) mask
 
 Innovation points:
@@ -24,9 +24,7 @@ Innovation points:
      fused — each modality learns its own representation before merging.
   3. Shared fused feature feeds all three task heads jointly — multi-task
      learning regularises the shared representation.
-  4. Dual-stream U-Net skip connections: decoder receives concatenated RGB+Depth
-     skips at every scale, making segmentation robust to low-illumination where
-     RGB quality degrades but depth remains reliable.
+  4. U-Net skip connections from RGB encoder for fine-grained segmentation.
   5. Depth encoder uses depthwise-separable convolutions to stay lightweight.
 """
 
@@ -147,28 +145,19 @@ class DepthEncoder(nn.Module):
     not texture — fewer feature channels are needed.
 
     Input : (B, 1, H, W)
-    Output:
-        d1 : (B, 32,  H/2,  W/2)
-        d2 : (B, 64,  H/4,  W/4)
-        d3 : (B, 128, H/8,  W/8)
-        d4 : (B, 128, H/16, W/16)  ← fed to Late Fusion
-    Returns intermediate features so the SegmentationHead can use
-    depth skip connections at every decoder scale, making the model
-    robust to low-illumination conditions where RGB cues degrade.
+    Output: (B, 128, H/16, W/16)
     """
     def __init__(self):
         super().__init__()
-        self.layer1 = conv_bn_relu(1,   32,  stride=2)          # H/2
-        self.layer2 = DepthwiseSepConv(32,  64,  stride=2)      # H/4
-        self.layer3 = DepthwiseSepConv(64,  128, stride=2)      # H/8
-        self.layer4 = DepthwiseSepConv(128, 128, stride=2)      # H/16
+        self.net = nn.Sequential(
+            conv_bn_relu(1,  32,  stride=2),             # H/2
+            DepthwiseSepConv(32,  64,  stride=2),        # H/4
+            DepthwiseSepConv(64,  128, stride=2),        # H/8
+            DepthwiseSepConv(128, 128, stride=2),        # H/16
+        )
 
     def forward(self, d):
-        d1 = self.layer1(d)    # (B, 32,  H/2,  W/2)
-        d2 = self.layer2(d1)   # (B, 64,  H/4,  W/4)
-        d3 = self.layer3(d2)   # (B, 128, H/8,  W/8)
-        d4 = self.layer4(d3)   # (B, 128, H/16, W/16)
-        return d1, d2, d3, d4
+        return self.net(d)    # (B, 128, H/16, W/16)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -200,29 +189,72 @@ class LateFusion(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Detection Head
+# Detection Head VER lr = 4e-4
+# ─────────────────────────────────────────────────────────────────────────────
+
+# class DetectionHead(nn.Module):
+#     """
+#     保留 4x4 的空间结构，让网络知道物体大概在哪个象限，再进行 BBox 回归
+#     """
+#     def __init__(self, in_ch: int = 256, img_size: tuple = (480,640)):
+#         super().__init__()
+        
+#         # 4x4 = 16. 保留了 16 个空间区块的位置信息
+#         self.spatial_size = 4 
+        
+#         self.head = nn.Sequential(
+#             nn.AdaptiveAvgPool2d(self.spatial_size), 
+#             nn.Flatten(),
+#             # 展平后维度是 256 * 4 * 4 = 4096
+#             nn.Linear(in_ch * self.spatial_size * self.spatial_size, 128),
+#             nn.ReLU(inplace=True),
+#             nn.Dropout(0.3),
+#             nn.Linear(128, 4),
+#             nn.Sigmoid(),
+#         )
+
+#     def forward(self, x):
+#         return self.head(x)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Detection Head VER lr = 5e-4
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DetectionHead(nn.Module):
-    """
-    Regresses [x1, y1, x2, y2] bounding box in pixel coordinates.
-    GAP → FC → sigmoid → [0,1] normalised coords (matches normalised GT bbox).
-    """
-    def __init__(self, in_ch: int = 256, img_size: tuple = (320, 320)):
+    def __init__(self, in_ch, img_size: tuple = (480,640)):
         super().__init__()
-        self.head = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(in_ch, 128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.3),
-            nn.Linear(128, 4),
-            nn.Sigmoid(),   # output in [0,1], matching normalised GT bbox
+        
+        # 创新点 1: 引入连续的 3x3 卷积提取空间几何特征 (边缘、角点)
+        self.conv_block = nn.Sequential(
+            nn.Conv2d(in_ch, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.GELU(), # GELU 比 ReLU 在复杂回归任务上表现更平滑
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.GELU()
+        )
+        
+        # 创新点 2: 提升空间网格分辨率 (从 4x4 提升到 7x7)
+        self.pool = nn.AdaptiveAvgPool2d(7)
+        self.flatten = nn.Flatten()
+        
+        # 创新点 3: 更深的非线性回归器 + Dropout 防过拟合
+        self.regressor = nn.Sequential(
+            nn.Linear(128 * 7 * 7, 256),
+            nn.GELU(),
+            nn.Dropout(0.2), # 防止网络死记硬背训练集的坐标
+            nn.Linear(256, 64),
+            nn.GELU(),
+            nn.Linear(64, 4),
+            nn.Sigmoid() # 物理外挂：强制保证输出坐标永远在 [0, 1] 之间！
         )
 
     def forward(self, x):
-        return self.head(x)   # (B, 4) normalised coords in [0, 1]
-
+        x = self.conv_block(x)
+        x = self.pool(x)
+        x = self.flatten(x)
+        bbox = self.regressor(x)
+        return bbox
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Segmentation Head (U-Net decoder)
@@ -248,48 +280,33 @@ class UNetDecoderBlock(nn.Module):
 
 class SegmentationHead(nn.Module):
     """
-    U-Net decoder using skip connections from BOTH RGB and Depth encoders.
-
-    Each decoder block receives concatenated RGB+Depth skips, so the model
-    can fall back to depth geometric cues when RGB quality degrades
-    (e.g. low-illumination conditions).
-
-    Skip channel sizes:
-        dec3: s3(256) + d3(128) = 384
-        dec2: s2(128) + d2(64)  = 192
-        dec1: s1(64)  + d1(32)  = 96
+    U-Net decoder using skip connections from the RGB encoder.
 
     For 320×320 input:
         fused (256, 20, 20)
-            → dec3 → (128, 40, 40)   skip=s3+d3 (384, 40, 40)
-            → dec2 → (64,  80, 80)   skip=s2+d2 (192, 80, 80)
-            → dec1 → (32, 160, 160)  skip=s1+d1 (96, 160, 160)
+            → dec3 → (128, 40, 40)   skip=s3 (256, 40, 40)
+            → dec2 → (64,  80, 80)   skip=s2 (128, 80, 80)
+            → dec1 → (32, 160, 160)  skip=s1 (64, 160, 160)
             → up   → (16, 320, 320)
             → 1×1  → (1,  320, 320)  raw logits
     """
     def __init__(self):
         super().__init__()
-        # skip_ch = RGB ch + Depth ch at each scale
-        self.dec3     = UNetDecoderBlock(256, 384, 128)   # s3(256)+d3(128)=384
-        self.dec2     = UNetDecoderBlock(128, 192, 64)    # s2(128)+d2(64) =192
-        self.dec1     = UNetDecoderBlock(64,  96,  32)    # s1(64) +d1(32) =96
+        self.dec3     = UNetDecoderBlock(256, 256, 128)
+        self.dec2     = UNetDecoderBlock(128, 128, 64)
+        self.dec1     = UNetDecoderBlock(64,  64,  32)
         self.up_final = nn.Sequential(
             nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2),
             nn.ReLU(inplace=True),
         )
         self.out      = nn.Conv2d(16, 1, kernel_size=1)
 
-    def forward(self, fused, s1, s2, s3, d1, d2, d3):
-        # Concat RGB and Depth skips at each scale
-        skip3 = torch.cat([s3, d3], dim=1)   # (B, 384, H/8,  W/8)
-        skip2 = torch.cat([s2, d2], dim=1)   # (B, 192, H/4,  W/4)
-        skip1 = torch.cat([s1, d1], dim=1)   # (B, 96,  H/2,  W/2)
-
-        x = self.dec3(fused, skip3)   # (B, 128, H/8,  W/8)
-        x = self.dec2(x,     skip2)   # (B, 64,  H/4,  W/4)
-        x = self.dec1(x,     skip1)   # (B, 32,  H/2,  W/2)
-        x = self.up_final(x)          # (B, 16,  H,    W)
-        return self.out(x)            # (B, 1,   H,    W)
+    def forward(self, fused, s1, s2, s3):
+        x = self.dec3(fused, s3)    # (B, 128, H/8,  W/8)
+        x = self.dec2(x,     s2)    # (B, 64,  H/4,  W/4)
+        x = self.dec1(x,     s1)    # (B, 32,  H/2,  W/2)
+        x = self.up_final(x)        # (B, 16,  H,    W)
+        return self.out(x)          # (B, 1,   H,    W)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -297,21 +314,26 @@ class SegmentationHead(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ClassificationHead(nn.Module):
-    """GAP → FC → 10-class logits."""
     def __init__(self, in_ch: int = 256, num_classes: int = NUM_CLASSES):
         super().__init__()
-        self.head = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
+        # 不用GAP，改用卷积进一步提特征再分类
+        self.conv = nn.Sequential(
+            conv_bn_relu(in_ch, 128, kernel=3, padding=1),
+            conv_bn_relu(128, 64, kernel=3, padding=1),
+        )
+        self.pool = nn.AdaptiveAvgPool2d(2)   # 保留2×2空间结构而不是1×1
+        self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(in_ch, 128),
+            nn.Linear(64 * 2 * 2, 128),
             nn.ReLU(inplace=True),
             nn.Dropout(0.4),
             nn.Linear(128, num_classes),
         )
 
     def forward(self, x):
-        return self.head(x)    # (B, num_classes)
-
+        x = self.conv(x)    # (B, 64, 20, 20)
+        x = self.pool(x)    # (B, 64, 2, 2)
+        return self.fc(x)   # (B, 10)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Full Multi-task Model
@@ -330,7 +352,7 @@ class HandGestureModel(nn.Module):
         depth : (B, 1, H, W)
 
     Forward output (dict):
-        'bbox'   : (B, 4)        [x1, y1, x2, y2] normalised to [0,1]
+        'bbox'   : (B, 4)        [x1, y1, x2, y2] pixel coords
         'mask'   : (B, 1, H, W)  raw logits  → sigmoid for probability
         'logits' : (B, 10)       class logits → softmax for probability
     """
@@ -354,20 +376,19 @@ class HandGestureModel(nn.Module):
         s1, s2, s3, s4 = self.rgb_encoder(rgb)
 
         if self.use_depth and self.depth_encoder is not None:
-            d1, d2, d3, d4 = self.depth_encoder(depth)
-            fused = self.fusion(s4, d4)
+            depth_feat = self.depth_encoder(depth)
+            fused      = self.fusion(s4, depth_feat)
         else:
-            # RGB-only mode: zero tensors stand in for depth skips
             fused = self.rgb_only_proj(s4)
-            d1 = torch.zeros(rgb.shape[0], 32,  s1.shape[2], s1.shape[3], device=rgb.device)
-            d2 = torch.zeros(rgb.shape[0], 64,  s2.shape[2], s2.shape[3], device=rgb.device)
-            d3 = torch.zeros(rgb.shape[0], 128, s3.shape[2], s3.shape[3], device=rgb.device)
 
-        return {
-            'bbox'  : self.det_head(fused),
-            'mask'  : self.seg_head(fused, s1, s2, s3, d1, d2, d3),
-            'logits': self.cls_head(fused),
-        }
+        bbox   = self.det_head(fused)
+        mask   = self.seg_head(fused, s1, s2, s3)
+
+        
+        # logits = self.cls_head(s3)
+        logits = self.cls_head(fused)
+
+        return {'bbox': bbox, 'mask': mask, 'logits': logits}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -394,15 +415,29 @@ class MultiTaskLoss(nn.Module):
         self.bce       = nn.BCEWithLogitsLoss()
         self.ce        = nn.CrossEntropyLoss()
 
-    @staticmethod
-    def dice_loss(pred_logits, target, eps=1e-6):
-        pred  = torch.sigmoid(pred_logits)
-        p     = pred.view(pred.size(0), -1)
-        t     = target.view(target.size(0), -1)
-        inter = (p * t).sum(dim=1)
-        dice  = (2 * inter + eps) / (p.sum(dim=1) + t.sum(dim=1) + eps)
-        return 1 - dice.mean()
+    # @staticmethod
+    # def dice_loss(pred_logits, target, eps=1e-6):
+    #     pred  = torch.sigmoid(pred_logits)
+    #     p     = pred.view(pred.size(0), -1)
+    #     t     = target.view(target.size(0), -1)
+    #     inter = (p * t).sum(dim=1)
+    #     dice  = (2 * inter + eps) / (p.sum(dim=1) + t.sum(dim=1) + eps)
+    #     return 1 - dice.mean()
 
+    @staticmethod
+    def dice_loss(pred_logits, target, eps=1e-5):
+        # 稍微调大一点 eps 防止除 0
+        pred  = torch.sigmoid(pred_logits)
+        
+        # 展平张量
+        p = pred.view(-1)
+        t = target.view(-1)
+        
+        intersection = (p * t).sum()
+        union = p.sum() + t.sum()
+        
+        dice = (2. * intersection + eps) / (union + eps)
+        return 1 - dice
     def forward(self, preds: dict, targets: dict):
         """
         targets keys:
@@ -450,7 +485,7 @@ if __name__ == '__main__':
     rgb   = torch.randn(B, 3, H, W).to(device)
     depth = torch.randn(B, 1, H, W).to(device)
     targets = {
-        'bbox'    : torch.rand(B, 4).to(device),           # normalised [0,1]
+        'bbox'    : torch.rand(B, 4).to(device),
         'mask'    : (torch.rand(B, 1, H, W) > 0.5).float().to(device),
         'label'   : torch.randint(0, NUM_CLASSES, (B,)).to(device),
         'has_mask': torch.tensor([True, True]).to(device),
