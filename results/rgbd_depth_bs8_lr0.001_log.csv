@@ -1,2 +1,0 @@
-epoch,lr,train_total,train_det,train_seg,train_cls,val_total,val_det,val_seg,val_cls
-1,1.00e-06,2.7457,0.0062,0.4454,2.2941,2.5645,0.0080,0.2539,2.3026

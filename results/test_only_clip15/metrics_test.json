@@ -1,0 +1,11 @@
+{
+  "split": "test",
+  "det_acc_at_05": 0.0,
+  "mean_bbox_iou": 0.1977,
+  "mean_seg_iou": 0.0,
+  "dice": 0.0,
+  "top1_acc": 0.1,
+  "macro_f1": 0.0199,
+  "n_samples": 150,
+  "n_annotated": 150
+}
