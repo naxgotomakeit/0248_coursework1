@@ -1,0 +1,5 @@
+{
+    "depth_scale": 0.0010000000474974513,
+    "unit": "meters per depth unit",
+    "description": "Multiply raw depth values by depth_scale to get depth in meters"
+}
