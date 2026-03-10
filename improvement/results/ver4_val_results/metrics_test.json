@@ -1,11 +1,11 @@
 {
   "split": "test",
-  "det_acc_at_05": 0.1133,
-  "mean_bbox_iou": 0.3228,
-  "mean_seg_iou": 0.0001,
-  "dice": 0.0002,
-  "top1_acc": 0.1,
-  "macro_f1": 0.0182,
-  "n_samples": 150,
-  "n_annotated": 150
+  "det_acc_at_05": 0.0757,
+  "mean_bbox_iou": 0.1563,
+  "mean_seg_iou": 0.7898,
+  "dice": 0.8589,
+  "top1_acc": 0.7696,
+  "macro_f1": 0.7707,
+  "n_samples": 3450,
+  "n_annotated": 3450
 }
