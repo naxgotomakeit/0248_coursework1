@@ -15,7 +15,7 @@ project_<studentno>_<surname>/
 ├── weights/                        
 ├── results/                        
 ├── requirements.txt
-├── improvement
+├── improvement   --- the innovation model
 │   └──results/  
 │   └──weights/
 │   └──src/
