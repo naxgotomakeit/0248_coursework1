@@ -189,64 +189,43 @@ class LateFusion(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Detection Head VER lr = 4e-4
-# ─────────────────────────────────────────────────────────────────────────────
-
-# class DetectionHead(nn.Module):
-#     """
-#     保留 4x4 的空间结构，让网络知道物体大概在哪个象限，再进行 BBox 回归
-#     """
-#     def __init__(self, in_ch: int = 256, img_size: tuple = (480,640)):
-#         super().__init__()
-        
-#         # 4x4 = 16. 保留了 16 个空间区块的位置信息
-#         self.spatial_size = 4 
-        
-#         self.head = nn.Sequential(
-#             nn.AdaptiveAvgPool2d(self.spatial_size), 
-#             nn.Flatten(),
-#             # 展平后维度是 256 * 4 * 4 = 4096
-#             nn.Linear(in_ch * self.spatial_size * self.spatial_size, 128),
-#             nn.ReLU(inplace=True),
-#             nn.Dropout(0.3),
-#             nn.Linear(128, 4),
-#             nn.Sigmoid(),
-#         )
-
-#     def forward(self, x):
-#         return self.head(x)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Detection Head VER lr = 5e-4
+# Detection Head
 # ─────────────────────────────────────────────────────────────────────────────
 
 class DetectionHead(nn.Module):
-    def __init__(self, in_ch, img_size: tuple = (480,640)):
+    """
+    Bounding box regression head.
+
+    Two 3×3 conv layers (256→128ch, GELU) extract spatial geometric features
+    such as edges and corners, followed by 7×7 adaptive average pooling and
+    a three-layer MLP with Sigmoid output to predict normalised [x1,y1,x2,y2].
+    """
+    def __init__(self, in_ch, img_size: tuple = (480, 640)):
         super().__init__()
-        
-        # 创新点 1: 引入连续的 3x3 卷积提取空间几何特征 (边缘、角点)
+
+        # Two conv layers to extract spatial geometric features (edges, corners)
         self.conv_block = nn.Sequential(
             nn.Conv2d(in_ch, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
-            nn.GELU(), # GELU 比 ReLU 在复杂回归任务上表现更平滑
+            nn.GELU(),  # GELU gives smoother gradients than ReLU for regression
             nn.Conv2d(256, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.GELU()
         )
-        
-        # 创新点 2: 提升空间网格分辨率 (从 4x4 提升到 7x7)
+
+        # 7×7 pooling retains coarse spatial structure before regression
         self.pool = nn.AdaptiveAvgPool2d(7)
         self.flatten = nn.Flatten()
-        
-        # 创新点 3: 更深的非线性回归器 + Dropout 防过拟合
+
+        # Three-layer MLP with Dropout to prevent overfitting
         self.regressor = nn.Sequential(
             nn.Linear(128 * 7 * 7, 256),
             nn.GELU(),
-            nn.Dropout(0.2), # 防止网络死记硬背训练集的坐标
+            nn.Dropout(0.2),
             nn.Linear(256, 64),
             nn.GELU(),
             nn.Linear(64, 4),
-            nn.Sigmoid() # 物理外挂：强制保证输出坐标永远在 [0, 1] 之间！
+            nn.Sigmoid()  # Constrains output coordinates to [0, 1]
         )
 
     def forward(self, x):
@@ -255,6 +234,7 @@ class DetectionHead(nn.Module):
         x = self.flatten(x)
         bbox = self.regressor(x)
         return bbox
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Segmentation Head (U-Net decoder)
@@ -314,14 +294,18 @@ class SegmentationHead(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ClassificationHead(nn.Module):
+    """
+    Two conv layers further refine features before classification,
+    followed by AdaptiveAvgPool2d(2) to retain 2×2 spatial structure
+    (richer than global average pooling), then a fully connected classifier.
+    """
     def __init__(self, in_ch: int = 256, num_classes: int = NUM_CLASSES):
         super().__init__()
-        # 不用GAP，改用卷积进一步提特征再分类
         self.conv = nn.Sequential(
             conv_bn_relu(in_ch, 128, kernel=3, padding=1),
             conv_bn_relu(128, 64, kernel=3, padding=1),
         )
-        self.pool = nn.AdaptiveAvgPool2d(2)   # 保留2×2空间结构而不是1×1
+        self.pool = nn.AdaptiveAvgPool2d(2)   # Retain 2×2 spatial structure instead of 1×1
         self.fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(64 * 2 * 2, 128),
@@ -331,9 +315,10 @@ class ClassificationHead(nn.Module):
         )
 
     def forward(self, x):
-        x = self.conv(x)    # (B, 64, 20, 20)
+        x = self.conv(x)    # (B, 64, H/16, W/16)
         x = self.pool(x)    # (B, 64, 2, 2)
         return self.fc(x)   # (B, 10)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Full Multi-task Model
@@ -352,7 +337,7 @@ class HandGestureModel(nn.Module):
         depth : (B, 1, H, W)
 
     Forward output (dict):
-        'bbox'   : (B, 4)        [x1, y1, x2, y2] pixel coords
+        'bbox'   : (B, 4)        [x1, y1, x2, y2] normalised coordinates
         'mask'   : (B, 1, H, W)  raw logits  → sigmoid for probability
         'logits' : (B, 10)       class logits → softmax for probability
     """
@@ -383,9 +368,6 @@ class HandGestureModel(nn.Module):
 
         bbox   = self.det_head(fused)
         mask   = self.seg_head(fused, s1, s2, s3)
-
-        
-        # logits = self.cls_head(s3)
         logits = self.cls_head(fused)
 
         return {'bbox': bbox, 'mask': mask, 'logits': logits}
@@ -415,29 +397,19 @@ class MultiTaskLoss(nn.Module):
         self.bce       = nn.BCEWithLogitsLoss()
         self.ce        = nn.CrossEntropyLoss()
 
-    # @staticmethod
-    # def dice_loss(pred_logits, target, eps=1e-6):
-    #     pred  = torch.sigmoid(pred_logits)
-    #     p     = pred.view(pred.size(0), -1)
-    #     t     = target.view(target.size(0), -1)
-    #     inter = (p * t).sum(dim=1)
-    #     dice  = (2 * inter + eps) / (p.sum(dim=1) + t.sum(dim=1) + eps)
-    #     return 1 - dice.mean()
-
     @staticmethod
     def dice_loss(pred_logits, target, eps=1e-5):
-        # 稍微调大一点 eps 防止除 0
-        pred  = torch.sigmoid(pred_logits)
-        
-        # 展平张量
+        pred = torch.sigmoid(pred_logits)
+
         p = pred.view(-1)
         t = target.view(-1)
-        
+
         intersection = (p * t).sum()
         union = p.sum() + t.sum()
-        
+
         dice = (2. * intersection + eps) / (union + eps)
         return 1 - dice
+
     def forward(self, preds: dict, targets: dict):
         """
         targets keys:
