@@ -43,10 +43,8 @@ def get_args():
     p.add_argument('--batch_size',   type=int,   default=8)
     p.add_argument('--lr',           type=float, default=1e-3)
     p.add_argument('--val_ratio',    type=float, default=0.2)
-    # p.add_argument('--img_size',     type=int,   default=480,
-    #                help='Square image size (H=W)')
-    p.add_argument('--img_h', type=int, default=480)
-    p.add_argument('--img_w', type=int, default=640)
+    p.add_argument('--img_h',        type=int,   default=480)
+    p.add_argument('--img_w',        type=int,   default=640)
     p.add_argument('--w_det',        type=float, default=1.0,
                    help='Detection loss weight')
     p.add_argument('--w_seg',        type=float, default=1.0,
@@ -57,11 +55,10 @@ def get_args():
                    help='RGB-only mode (ablation)')
     p.add_argument('--num_workers',  type=int,   default=4)
     p.add_argument('--seed',         type=int,   default=42)
-    # ── 早停参数 ──────────────────────────────────────────────────────────────
     p.add_argument('--es_patience',  type=int,   default=10,
-                   help='早停耐心值：连续多少轮无改善就停止训练')
+                   help='Early stopping patience: number of epochs without improvement before halting')
     p.add_argument('--es_min_delta', type=float, default=1e-4,
-                   help='最小改善幅度：val_loss下降超过此值才算有效改善')
+                   help='Minimum improvement in val_loss to be considered a meaningful update')
     return p.parse_args()
 
 
@@ -71,9 +68,10 @@ def get_args():
 
 class EarlyStopper:
     """
-    监控 val_loss，当连续 patience 轮没有超过 min_delta 的改善时触发早停。
+    Monitors val_loss and triggers early stopping when no improvement
+    greater than min_delta is observed for `patience` consecutive epochs.
 
-    使用方法:
+    Usage:
         stopper = EarlyStopper(patience=10, min_delta=1e-4)
         if stopper.step(val_loss):
             break
@@ -82,17 +80,17 @@ class EarlyStopper:
         self.patience  = patience
         self.min_delta = min_delta
         self.best_loss = float('inf')
-        self.counter   = 0   # 已连续无改善的轮数
+        self.counter   = 0   # consecutive epochs without meaningful improvement
 
     def step(self, val_loss: float) -> bool:
-        """返回 True 表示应停止训练。"""
+        """Returns True if training should stop."""
         if val_loss < self.best_loss - self.min_delta:
-            # 有效改善：重置计数器
+            # Meaningful improvement — reset counter
             self.best_loss = val_loss
             self.counter   = 0
             return False
         else:
-            # 无效改善：计数器+1
+            # No meaningful improvement — increment counter
             self.counter += 1
             return self.counter >= self.patience
 
@@ -129,16 +127,17 @@ def make_splits(root_dir: str, val_ratio: float, seed: int,
 
     print(f"Train students: {len(train_students)}  |  Val students: {len(val_students)}")
 
-    # Build full dataset twice: once with augment, once without
+    # Build full dataset twice: once with augmentation, once without
     full_aug = HandGestureDataset(root_dir, use_depth=use_depth,
                                   keyframes_only=False, augment=True,
                                   img_size=img_size)
     full_no_aug = HandGestureDataset(root_dir, use_depth=use_depth,
-                                     keyframes_only=False, augment=False,    
+                                     keyframes_only=False, augment=False,
                                      img_size=img_size)
 
     def student_of(sample):
-        # 终极防套娃写法：直接拿相对于 root 的第一级目录名
+        # Resolve student folder robustly by taking the first path component
+        # relative to root, handling arbitrary nesting inside student dirs.
         p = Path(sample['rgb_path'])
         student_folder_name = p.relative_to(root).parts[0]
         return str(root / student_folder_name)
@@ -186,7 +185,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device, use_depth):
     model.train()
     totals = {'loss_total': 0, 'loss_det': 0, 'loss_seg': 0, 'loss_cls': 0}
     n_batches = 0
-        # ────────────────────────────────────────
+
     for batch in loader:
         rgb   = batch['rgb'].to(device)
         depth = batch['depth'].to(device) if use_depth else \
@@ -201,36 +200,10 @@ def train_one_epoch(model, loader, criterion, optimizer, device, use_depth):
 
         optimizer.zero_grad()
         preds = model(rgb, depth)
-        
-
-        # # 1. 看logits分布
-        # print("logits:", preds['logits'][0].detach().cpu())
-
-        # # 2. 看cls_head的参数有没有在变
-        # # 把原来那段for循环替换成这个
-        # for name, param in model.cls_head.named_parameters():
-        #     grad_info = param.grad.abs().mean().item() if param.grad is not None else 'None'
-        #     print(f"{name}: grad={grad_info}")
-        # # 3. 看s3的值
-        # s1, s2, s3, s4 = model.rgb_encoder(rgb)
-        # print("s3 mean:", s3.mean().item(), "std:", s3.std().item())
-        
         loss, loss_dict = criterion(preds, targets)
-        # # ---- Step3: check logits / probs behaviour (print first batch only) ----
-        # if n_batches == 0:   # 只打印每个 epoch 的第一个 batch
-        #     logits = preds["logits"].detach()
-        #     labels = targets["label"].detach()
-        #     probs  = torch.softmax(logits, dim=1)
-
-        #     print("logits range:", float(logits.min()), float(logits.max()))
-        #     print("probs mean (first 5):", probs.mean(0)[:5].cpu().numpy(), "sum:", float(probs.mean(0).sum()))
-        #     print("pred bincount:", torch.bincount(probs.argmax(1), minlength=10).cpu().numpy())
-        #     print("gt  bincount:", torch.bincount(labels, minlength=10).cpu().numpy())
         loss.backward()
-        # print("cls_head grad:", model.cls_head.fc[-1].weight.grad)
 
-
-        # Gradient clipping
+        # Gradient clipping to stabilise training
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
 
         optimizer.step()
@@ -284,7 +257,7 @@ def main():
 
     device    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     use_depth = not args.no_depth
-    img_size = (args.img_h, args.img_w)
+    img_size  = (args.img_h, args.img_w)
 
     print(f"\n{'='*55}")
     print(f"  Device      : {device}")
@@ -329,7 +302,6 @@ def main():
         optimizer, T_max=args.epochs, eta_min=1e-6
     )
 
-    # ── Early stopper ─────────────────────────────────────────────────────────
     early_stopper = EarlyStopper(
         patience=args.es_patience,
         min_delta=args.es_min_delta,
@@ -364,8 +336,7 @@ def main():
         current_lr = optimizer.param_groups[0]['lr']
         elapsed    = time.time() - t0
 
-        # ── Console log ───────────────────────────────────────────────────────
-        # 显示早停计数器，方便你知道还有几轮会触发
+        # Early stopper counter shown for monitoring purposes
         es_info = f"  [ES {early_stopper.counter}/{early_stopper.patience}]"
         print(
             f"Epoch [{epoch:3d}/{args.epochs}]  "
@@ -412,14 +383,14 @@ def main():
         if early_stopper.step(val_losses['loss_total']):
             print(
                 f"\n  ✗ Early stopping triggered at epoch {epoch}  "
-                f"(连续 {args.es_patience} 轮 val_loss 无显著改善, "
+                f"(no significant improvement in val_loss for {args.es_patience} consecutive epochs, "
                 f"best={early_stopper.best_loss:.4f})"
             )
             break
 
     # ── Save last checkpoint ──────────────────────────────────────────────────
     torch.save({
-        'epoch'      : epoch,          # 实际停止的轮数（早停时 < args.epochs）
+        'epoch'      : epoch,          # actual last epoch (may be < args.epochs if early stopped)
         'model_state': model.state_dict(),
         'optim_state': optimizer.state_dict(),
         'val_loss'   : val_losses['loss_total'],
