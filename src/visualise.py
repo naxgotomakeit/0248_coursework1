@@ -123,7 +123,7 @@ def plot_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray,
     ax.set_xlabel('Predicted', fontsize=11)
     ax.set_ylabel('Ground Truth', fontsize=11)
 
-    # Highlight diagonal
+    # Highlight diagonal cells
     for i in range(len(CLASS_NAMES)):
         ax.add_patch(patches.Rectangle(
             (i - 0.5, i - 0.5), 1, 1,
@@ -147,11 +147,12 @@ def overlay_predictions(model, dataset, device, use_depth,
                          n_per_class: int = 1):
     """
     For each gesture class, picks up to n_per_class annotated samples and
-    plots a 3-column grid:
-        Col 0: RGB image + predicted bounding box (green)
+    plots a 4-column grid:
+        Col 0: RGB image + predicted bounding box (green solid)
                           + ground-truth bbox (red dashed)
-        Col 1: Ground-truth mask (white = hand)
-        Col 2: Predicted mask   (white = hand)
+        Col 1: Classification bar chart (top-5 softmax scores)
+        Col 2: Ground-truth mask (white = hand)
+        Col 3: Predicted mask   (white = hand)
 
     Correct classifications are marked ✓ (green), wrong ones ✗ (red).
 
@@ -165,24 +166,21 @@ def overlay_predictions(model, dataset, device, use_depth,
     """
     model.eval()
 
-    # ── Collect indices ───────────────────────────────────────────────────────
-    # ── Collect indices ───────────────────────────────────────────────────────
+    # ── Collect one sample per class ─────────────────────────────────────────
     class_buckets = {i: [] for i in range(len(GESTURE_CLASSES))}
 
-    n_total = len(dataset)
-    # 🎲 随机起点魔法加在这里！
+    # Random start index for varied sampling across runs
+    n_total   = len(dataset)
     start_idx = random.randint(0, n_total - 1)
-    # 拼出一个从 start_idx 开始，最后绕回开头的完美顺序列表
-    indices = list(range(start_idx, n_total)) + list(range(0, start_idx))
+    indices   = list(range(start_idx, n_total)) + list(range(0, start_idx))
 
-    # 用咱们的新 indices 替换掉原来死板的 range(len(dataset))
     for idx in indices:
         if hasattr(dataset, 'dataset'):
             raw_idx = dataset.indices[idx]
             s = dataset.dataset.samples[raw_idx]
         else:
             s = dataset.samples[idx]
-            
+
         if s['has_mask'] and len(class_buckets[s['label']]) < n_per_class:
             class_buckets[s['label']].append(idx)
 
@@ -192,11 +190,7 @@ def overlay_predictions(model, dataset, device, use_depth,
         print("  No annotated samples found for overlay.")
         return
 
-    # ── Plot: 4 columns now ───────────────────────────────────────────────────
-    #   Col 0: RGB + GT bbox (red dashed) + Pred bbox (green solid)
-    #   Col 1: Classification bar chart (top-5 softmax scores)
-    #   Col 2: GT mask
-    #   Col 3: Pred mask
+    # ── Plot grid ─────────────────────────────────────────────────────────────
     fig, axes = plt.subplots(n, 4, figsize=(17, 4.2 * n),
                               gridspec_kw={'wspace': 0.12, 'hspace': 0.4,
                                            'width_ratios': [2, 1.6, 1, 1]})
@@ -215,10 +209,9 @@ def overlay_predictions(model, dataset, device, use_depth,
                   torch.zeros(1, 1, *sample['rgb'].shape[1:]).to(device)
         gt_mask  = sample['mask'].squeeze().numpy()
         gt_bbox  = sample['bbox'].numpy()
-        
-        
-        gt_label = sample['label'].item() if isinstance(sample['label'], torch.Tensor) else sample['label']
-        print(f"idx={idx}, s_label={s['label']}, gt_label={gt_label}, gesture={s['gesture']}")
+        gt_label = sample['label'].item() \
+                   if isinstance(sample['label'], torch.Tensor) \
+                   else sample['label']
 
         preds      = model(rgb_t, depth_t)
         pred_mask  = (torch.sigmoid(preds['mask']) > 0.5).squeeze().cpu().numpy()
@@ -229,20 +222,17 @@ def overlay_predictions(model, dataset, device, use_depth,
         pred_label = int(scores.argmax())
         confidence = float(scores[pred_label])
 
-        rgb_show   = _denorm(sample['rgb'])
-        # 在这行下面： rgb_show   = _denorm(sample['rgb'])
-
+        rgb_show     = _denorm(sample['rgb'])
         H_img, W_img = rgb_show.shape[:2]
-        
-        # 反归一化 Predicted bbox
+
+        # Denormalise bbox coordinates [0,1] → pixel coordinates
         px1, py1, px2, py2 = pred_bbox
         px1, px2 = px1 * W_img, px2 * W_img
         py1, py2 = py1 * H_img, py2 * H_img
-        
-        # 反归一化 GT bbox
         gx1, gy1, gx2, gy2 = gt_bbox
         gx1, gx2 = gx1 * W_img, gx2 * W_img
         gy1, gy2 = gy1 * H_img, gy2 * H_img
+
         correct    = pred_label == gt_label
         tick       = '✓' if correct else '✗'
         tick_color = 'limegreen' if correct else 'tomato'
@@ -252,15 +242,10 @@ def overlay_predictions(model, dataset, device, use_depth,
         # ── Col 0: RGB + bboxes ──────────────────────────────────────────────
         ax = axes[row, 0]
         ax.imshow(rgb_show)
-
-        # Predicted bbox (solid green)
-        px1, py1, px2, py2 = pred_bbox
         ax.add_patch(patches.Rectangle(
             (px1, py1), px2 - px1, py2 - py1,
             linewidth=2.5, edgecolor='limegreen', facecolor='none'
         ))
-        # GT bbox (dashed red)
-        gx1, gy1, gx2, gy2 = gt_bbox
         ax.add_patch(patches.Rectangle(
             (gx1, gy1), gx2 - gx1, gy2 - gy1,
             linewidth=2.5, edgecolor='tomato', facecolor='none', linestyle='--'
@@ -274,7 +259,6 @@ def overlay_predictions(model, dataset, device, use_depth,
         # ── Col 1: Classification bar chart ──────────────────────────────────
         ax2 = axes[row, 1]
 
-        # Show top-5 classes sorted by score
         top5_idx    = scores.argsort()[::-1][:5]
         top5_names  = [CLASS_NAMES[i] for i in top5_idx]
         top5_scores = scores[top5_idx]
@@ -293,7 +277,6 @@ def overlay_predictions(model, dataset, device, use_depth,
         bars = ax2.barh(range(5), top5_scores, color=bar_colors,
                         edgecolor='white', linewidth=0.5)
 
-        # Score labels on bars
         for bar, score in zip(bars, top5_scores):
             ax2.text(min(score + 0.02, 0.95), bar.get_y() + bar.get_height() / 2,
                      f'{score:.2f}', va='center', fontsize=8)
@@ -302,11 +285,9 @@ def overlay_predictions(model, dataset, device, use_depth,
         ax2.set_yticklabels(top5_names, fontsize=8)
         ax2.set_xlim(0, 1.15)
         ax2.set_xlabel('Confidence', fontsize=8)
-        ax2.invert_yaxis()   # highest score on top
+        ax2.invert_yaxis()
         ax2.axvline(x=0.5, color='gray', linestyle=':', linewidth=0.8)
         ax2.tick_params(axis='x', labelsize=7)
-
-        # Title: show prediction result
         ax2.set_title(
             f'Pred: {pred_name} ({confidence:.0%}) {tick}',
             fontsize=9, color=tick_color, pad=4
@@ -321,25 +302,22 @@ def overlay_predictions(model, dataset, device, use_depth,
         axes[row, 3].imshow(pred_mask, cmap='gray', vmin=0, vmax=1)
         axes[row, 3].axis('off')
 
-    # ── Colour legend (first row only) ────────────────────────────────────────
+    # ── Colour legend ─────────────────────────────────────────────────────────
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
-    bbox_legend = [
+
+    axes[0, 0].legend(handles=[
         Line2D([0], [0], color='limegreen', linewidth=2,  label='Pred bbox'),
         Line2D([0], [0], color='tomato',    linewidth=2,
                linestyle='--', label='GT bbox'),
-    ]
-    axes[0, 0].legend(handles=bbox_legend, fontsize=7,
-                      loc='lower right', framealpha=0.7)
+    ], fontsize=7, loc='lower right', framealpha=0.7)
 
-    cls_legend = [
+    axes[0, 1].legend(handles=[
         Patch(color='limegreen', label='Correct (GT=Pred)'),
         Patch(color='tomato',    label='GT class (missed)'),
         Patch(color='orange',    label='Wrong top-1'),
         Patch(color='steelblue', label='Other'),
-    ]
-    axes[0, 1].legend(handles=cls_legend, fontsize=6.5,
-                      loc='lower right', framealpha=0.7)
+    ], fontsize=6.5, loc='lower right', framealpha=0.7)
 
     fig.suptitle('Qualitative Predictions  —  Detection · Classification · Segmentation',
                  fontsize=13, fontweight='bold', y=1.005)
@@ -392,19 +370,18 @@ def get_args():
     p = argparse.ArgumentParser(description='Visualisation tools')
     p.add_argument('--mode', choices=['curves', 'overlay', 'dist', 'all'],
                    default='all')
-    p.add_argument('--log',        type=str, default=None,
+    p.add_argument('--log',         type=str,   default=None,
                    help='Path to train_log.csv (for curves mode)')
-    p.add_argument('--checkpoint', type=str, default=None,
+    p.add_argument('--checkpoint',  type=str,   default=None,
                    help='Path to model checkpoint (for overlay mode)')
-    p.add_argument('--data_root',  type=str, default='./dataset')
-    p.add_argument('--results_dir',type=str, default='./results')
-    # p.add_argument('--img_size',   type=int, default=320)
-    p.add_argument('--img_h', type=int, default=480)
-    p.add_argument('--img_w', type=int, default=640)
-    p.add_argument('--val_ratio',  type=float, default=0.2)
-    p.add_argument('--seed',       type=int, default=42)
-    p.add_argument('--no_depth',   action='store_true')
-    p.add_argument('--n_per_class',type=int, default=1)
+    p.add_argument('--data_root',   type=str,   default='./dataset')
+    p.add_argument('--results_dir', type=str,   default='./results')
+    p.add_argument('--img_h',       type=int,   default=480)
+    p.add_argument('--img_w',       type=int,   default=640)
+    p.add_argument('--val_ratio',   type=float, default=0.2)
+    p.add_argument('--seed',        type=int,   default=42)
+    p.add_argument('--no_depth',    action='store_true')
+    p.add_argument('--n_per_class', type=int,   default=1)
     return p.parse_args()
 
 
@@ -412,14 +389,13 @@ def main():
     args      = get_args()
     results   = args.results_dir
     use_depth = not args.no_depth
-    img_size = (args.img_h, args.img_w)
+    img_size  = (args.img_h, args.img_w)
     os.makedirs(results, exist_ok=True)
 
     # ── Training curves ───────────────────────────────────────────────────────
     if args.mode in ('curves', 'all'):
         log = args.log
         if log is None:
-            # Try to find automatically
             candidates = list(Path(results).glob('*_log.csv'))
             if candidates:
                 log = str(candidates[0])
