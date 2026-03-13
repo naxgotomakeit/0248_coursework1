@@ -54,19 +54,18 @@ from train import collate_fn, make_splits
 
 def get_args():
     p = argparse.ArgumentParser(description='Evaluate Hand Gesture Model')
-    p.add_argument('--data_root',  type=str, required=True)
-    p.add_argument('--checkpoint', type=str, required=True)
-    p.add_argument('--results_dir',type=str, default='./results')
-    p.add_argument('--batch_size', type=int, default=8)
-    # p.add_argument('--img_size',   type=int, default=320)
-    p.add_argument('--img_h', type=int, default=480)
-    p.add_argument('--img_w', type=int, default=640)
-    p.add_argument('--val_ratio',  type=float, default=0.2)
-    p.add_argument('--seed',       type=int, default=42)
-    p.add_argument('--no_depth',   action='store_true')
-    p.add_argument('--test',       action='store_true',
+    p.add_argument('--data_root',   type=str,   required=True)
+    p.add_argument('--checkpoint',  type=str,   required=True)
+    p.add_argument('--results_dir', type=str,   default='./results')
+    p.add_argument('--batch_size',  type=int,   default=8)
+    p.add_argument('--img_h',       type=int,   default=480)
+    p.add_argument('--img_w',       type=int,   default=640)
+    p.add_argument('--val_ratio',   type=float, default=0.2)
+    p.add_argument('--seed',        type=int,   default=42)
+    p.add_argument('--no_depth',    action='store_true')
+    p.add_argument('--test',        action='store_true',
                    help='Evaluate on full dataset (test mode, no split)')
-    p.add_argument('--num_workers',type=int, default=4)
+    p.add_argument('--num_workers', type=int,   default=4)
     return p.parse_args()
 
 
@@ -106,7 +105,7 @@ def mask_iou_dice(pred_mask: np.ndarray, gt_mask: np.ndarray):
     """
     eps = 1e-6
     pred_flat = pred_mask.reshape(len(pred_mask), -1).astype(bool)
-    gt_flat   = gt_mask.reshape(len(gt_mask),   -1).astype(bool)
+    gt_flat   = gt_mask.reshape(len(gt_mask),     -1).astype(bool)
 
     inter = (pred_flat & gt_flat).sum(axis=1).astype(float)
     union = (pred_flat | gt_flat).sum(axis=1).astype(float)
@@ -156,7 +155,7 @@ def evaluate(model, loader, device, use_depth, results_dir, split_name='val'):
             ious = bbox_iou(pred_bbox, gt_bbox)
             all_bbox_iou.extend(ious.tolist())
 
-            # Segmentation — threshold logits at 0.5
+            # Segmentation — threshold sigmoid output at 0.5
             pred_mask = (torch.sigmoid(preds['mask'][has_mask]) > 0.5) \
                         .squeeze(1).cpu().numpy()   # (N, H, W) bool
             gt_mask   = (batch['mask'][has_mask] > 0.5) \
@@ -169,9 +168,9 @@ def evaluate(model, loader, device, use_depth, results_dir, split_name='val'):
     all_gt_cls   = np.array(all_gt_cls)
 
     # Detection metrics
-    mean_bbox_iou    = float(np.mean(all_bbox_iou)) if all_bbox_iou else 0.0
-    det_acc_at_05    = float(np.mean(np.array(all_bbox_iou) >= 0.5)) \
-                       if all_bbox_iou else 0.0
+    mean_bbox_iou = float(np.mean(all_bbox_iou)) if all_bbox_iou else 0.0
+    det_acc_at_05 = float(np.mean(np.array(all_bbox_iou) >= 0.5)) \
+                    if all_bbox_iou else 0.0
 
     # Segmentation metrics
     if all_pred_masks:
@@ -222,15 +221,15 @@ def evaluate(model, loader, device, use_depth, results_dir, split_name='val'):
 
     # ── Save metrics as JSON ──────────────────────────────────────────────────
     metrics = {
-        'split'          : split_name,
-        'det_acc_at_05'  : round(det_acc_at_05,   4),
-        'mean_bbox_iou'  : round(mean_bbox_iou,    4),
-        'mean_seg_iou'   : round(float(mean_seg_iou), 4),
-        'dice'           : round(float(mean_dice),    4),
-        'top1_acc'       : round(top1_acc,         4),
-        'macro_f1'       : round(macro_f1,         4),
-        'n_samples'      : len(all_pred_cls),
-        'n_annotated'    : len(all_bbox_iou),
+        'split'        : split_name,
+        'det_acc_at_05': round(det_acc_at_05,        4),
+        'mean_bbox_iou': round(mean_bbox_iou,         4),
+        'mean_seg_iou' : round(float(mean_seg_iou),   4),
+        'dice'         : round(float(mean_dice),       4),
+        'top1_acc'     : round(top1_acc,              4),
+        'macro_f1'     : round(macro_f1,              4),
+        'n_samples'    : len(all_pred_cls),
+        'n_annotated'  : len(all_bbox_iou),
     }
     json_path = Path(results_dir) / f'metrics_{split_name}.json'
     with open(json_path, 'w') as f:
@@ -245,7 +244,6 @@ def evaluate(model, loader, device, use_depth, results_dir, split_name='val'):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-
 def visualise_predictions(model, dataset, device, use_depth,
                            results_dir, split_name='val', n_samples=12):
     """
@@ -255,36 +253,31 @@ def visualise_predictions(model, dataset, device, use_depth,
     model.eval()
     os.makedirs(results_dir, exist_ok=True)
 
-    # ─── 从这里开始是咱们的神级优化选图逻辑 ───
-    n_total = len(dataset)
-    
-    # 随机挑一个起点（比如 2500），然后按 2500, 2501... 的顺序往下找
-    # 完美兼顾了“随机抽盲盒”和“服务器硬盘的高速顺序读取”！
-    start_idx = random.randint(0, n_total - 1)
-    indices = list(range(start_idx, n_total)) + list(range(0, start_idx))
+    # Randomly select a start index, then scan forward wrapping around.
+    # This balances random sampling with sequential disk access.
+    n_total    = len(dataset)
+    start_idx  = random.randint(0, n_total - 1)
+    indices    = list(range(start_idx, n_total)) + list(range(0, start_idx))
 
-    class_seen = set()
+    class_seen     = set()
     samples_to_viz = []
 
     for idx in indices:
         sample = dataset[idx]
-        
+
         if not sample['has_mask']:
             continue
-            
-        # 安全获取 label
-        label_val = sample['label'].item() if isinstance(sample['label'], torch.Tensor) else sample['label']
-        
+
+        label_val = sample['label'].item() \
+                    if isinstance(sample['label'], torch.Tensor) \
+                    else sample['label']
+
         if label_val not in class_seen:
             class_seen.add(label_val)
             samples_to_viz.append(sample)
-            
+
         if len(samples_to_viz) >= n_samples:
             break
-    # ─── 选图逻辑结束 ───
-
-        
-    # fig, axes = plt.subplots(n, 3, figsize=(12, 4 * n)) ... (保留你后面的画图代码)
 
     n = len(samples_to_viz)
     if n == 0:
@@ -293,27 +286,24 @@ def visualise_predictions(model, dataset, device, use_depth,
 
     fig, axes = plt.subplots(n, 3, figsize=(12, 4 * n))
     if n == 1:
-        axes = axes[None, :]   # ensure 2D
+        axes = axes[None, :]   # ensure 2D indexing
 
-    # ImageNet denorm for display
+    # ImageNet denormalisation for display
     mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
     std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 
     for row, sample in enumerate(samples_to_viz):
-        # 注意：这里直接用上面存下来的 sample，不需要再调用 dataset[idx]
-        
         rgb_t   = sample['rgb'].unsqueeze(0).to(device)
         depth_t = sample['depth'].unsqueeze(0).to(device) if use_depth else \
                   torch.zeros(1, 1, *sample['rgb'].shape[1:]).to(device)
-        
-        # 确保 mask 和 bbox 是 tensor 才能调用 .numpy()
+
         gt_mask = sample['mask'].squeeze()
         if isinstance(gt_mask, torch.Tensor):
             gt_mask = gt_mask.numpy()
-            
+
         gt_bbox = sample['bbox']
         if isinstance(gt_bbox, torch.Tensor):
-             gt_bbox = gt_bbox.numpy()
+            gt_bbox = gt_bbox.numpy()
 
         preds      = model(rgb_t, depth_t)
         pred_mask  = (torch.sigmoid(preds['mask']) > 0.5).squeeze().cpu().numpy()
@@ -323,15 +313,17 @@ def visualise_predictions(model, dataset, device, use_depth,
         # Denormalise RGB for display
         rgb_show = (sample['rgb'] * std + mean).clamp(0, 1).permute(1, 2, 0).numpy()
 
-        # 直接从 sample 里取 label，万无一失
-        label_val = sample['label'].item() if isinstance(sample['label'], torch.Tensor) else sample['label']
-        print(f"  Visualising sample {row+1}/{n} — GT: {IDX_TO_CLASS[label_val]} | Pred: {IDX_TO_CLASS[pred_label]}")
-        # 用绝对安全的字典映射，代替列表索引！
+        label_val  = sample['label'].item() \
+                     if isinstance(sample['label'], torch.Tensor) \
+                     else sample['label']
         gesture_short = IDX_TO_CLASS[label_val].split('_')[1]
         pred_short    = IDX_TO_CLASS[pred_label].split('_')[1]
         correct       = '✓' if label_val == pred_label else '✗'
 
-        # 反归一化bbox坐标 [0,1] → 像素坐标
+        print(f"  Visualising sample {row+1}/{n} — "
+              f"GT: {IDX_TO_CLASS[label_val]} | Pred: {IDX_TO_CLASS[pred_label]}")
+
+        # Denormalise bbox coordinates [0,1] → pixel coordinates
         H_img, W_img = rgb_show.shape[:2]
         px1, py1, px2, py2 = pred_bbox
         px1, px2 = px1 * W_img, px2 * W_img
@@ -340,19 +332,16 @@ def visualise_predictions(model, dataset, device, use_depth,
         gx1, gx2 = gx1 * W_img, gx2 * W_img
         gy1, gy2 = gy1 * H_img, gy2 * H_img
 
-        # Column 0: RGB + predicted bbox
+        # Column 0: RGB + predicted bbox (green) + GT bbox (dashed red)
         axes[row, 0].imshow(rgb_show)
-        rect = patches.Rectangle(
+        axes[row, 0].add_patch(patches.Rectangle(
             (px1, py1), px2 - px1, py2 - py1,
             linewidth=2, edgecolor='lime', facecolor='none'
-        )
-        axes[row, 0].add_patch(rect)
-        # GT bbox (dashed red)
-        gt_rect = patches.Rectangle(
+        ))
+        axes[row, 0].add_patch(patches.Rectangle(
             (gx1, gy1), gx2 - gx1, gy2 - gy1,
             linewidth=2, edgecolor='tomato', facecolor='none', linestyle='--'
-        )
-        axes[row, 0].add_patch(gt_rect)
+        ))
         axes[row, 0].set_title(
             f'GT: {gesture_short}  Pred: {pred_short} {correct}', fontsize=9
         )
@@ -384,7 +373,7 @@ def main():
     args      = get_args()
     device    = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     use_depth = not args.no_depth
-    img_size = (args.img_h, args.img_w)
+    img_size  = (args.img_h, args.img_w)
 
     print(f"Device    : {device}")
     print(f"Checkpoint: {args.checkpoint}")
@@ -409,11 +398,11 @@ def main():
             num_workers=args.num_workers, pin_memory=True,
             collate_fn=collate_fn,
         )
-        split_name = 'test'
+        split_name  = 'test'
         viz_dataset = dataset
 
     else:
-        # Val mode: use the same split as training
+        # Val mode: use the same student-level split as training
         _, val_set = make_splits(
             args.data_root, args.val_ratio, args.seed, img_size, use_depth
         )
