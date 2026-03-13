@@ -58,12 +58,11 @@ def mask_to_bbox(mask_np: np.ndarray, img_h: int, img_w: int):
         return [0.0, 0.0, 0.0, 0.0]
     y1, y2 = np.where(rows)[0][[0, -1]]
     x1, x2 = np.where(cols)[0][[0, -1]]
-    
     return [
-        max(0.0, min(1.0, x1/img_w)),
-        max(0.0, min(1.0, y1/img_h)),
-        max(0.0, min(1.0, x2/img_w)),
-        max(0.0, min(1.0, y2/img_h))
+        max(0.0, min(1.0, x1 / img_w)),
+        max(0.0, min(1.0, y1 / img_h)),
+        max(0.0, min(1.0, x2 / img_w)),
+        max(0.0, min(1.0, y2 / img_h)),
     ]
 
 
@@ -78,7 +77,6 @@ class HandGestureDataset(Dataset):
         root_dir       : path to dataset/ folder containing student subfolders
         use_depth      : if True, load depth PNG and depth_raw .npy
         keyframes_only : if True, only return frames that have annotation masks
-        transform      : optional custom transform applied to rgb PIL image
         augment        : if True, apply built-in training augmentations
         img_size       : (H, W) to resize all images/masks to
         split_file     : optional path to a .txt file listing clip paths to use
@@ -107,27 +105,26 @@ class HandGestureDataset(Dataset):
     def _build_index(self, split_file):
         """Walk dataset folder and collect all (frame, metadata) entries."""
 
-        # Optionally restrict to a pre-defined list of clips
         allowed_clips = None
-        # Walk: dataset/<student>/...中间可能有多层套娃.../<gesture>/<clip>/
+
+        # Walk: dataset/<student>/.../<gesture>/<clip>/
+        # rglob('*') recursively searches all subdirectories under each student folder,
+        # handling arbitrary nesting between the student root and gesture folders.
         for student_dir in sorted(self.root_dir.iterdir()):
             if not student_dir.is_dir():
                 continue
 
-            # 🚨 核心修改点：把 iterdir() 改成 rglob('*')
-            # rglob('*') 会像雷达一样递归搜索该学生文件夹下的所有子文件夹
             for gesture_dir in sorted(student_dir.rglob('*')):
                 if not gesture_dir.is_dir():
                     continue
-                
-                gesture_name = gesture_dir.name  # 尝试获取文件夹名字
+
+                gesture_name = gesture_dir.name
                 if gesture_name not in CLASS_TO_IDX:
-                    # 遇到中间的“套娃”文件夹（比如 25115816_Jin），静默跳过，继续往下挖
+                    # Intermediate nesting folder — skip and keep searching deeper
                     continue
-                
+
                 label = CLASS_TO_IDX[gesture_name]
 
-                # --- 下面的部分完全保持你原来的样子，不需要动 ---
                 for clip_dir in sorted(gesture_dir.iterdir()):
                     if not clip_dir.is_dir():
                         continue
@@ -136,13 +133,11 @@ class HandGestureDataset(Dataset):
                     clip_rel = str(clip_dir.relative_to(self.root_dir))
                     if allowed_clips is not None and clip_rel not in allowed_clips:
                         continue
-                        
-                    # ... 后面读取 rgb 目录的代码保持原样 ...
 
-                    rgb_dir   = clip_dir / 'rgb'
-                    dep_dir   = clip_dir / 'depth'
+                    rgb_dir    = clip_dir / 'rgb'
+                    dep_dir    = clip_dir / 'depth'
                     depraw_dir = clip_dir / 'depth_raw'
-                    ann_dir   = clip_dir / 'annotation'
+                    ann_dir    = clip_dir / 'annotation'
 
                     if not rgb_dir.exists():
                         continue
@@ -152,7 +147,6 @@ class HandGestureDataset(Dataset):
                     if ann_dir.exists():
                         for ann_file in ann_dir.iterdir():
                             if ann_file.suffix.lower() == '.png':
-                                # frame name without extension
                                 annotated_frames.add(ann_file.stem)
 
                     # Iterate over all rgb frames in this clip
@@ -185,49 +179,13 @@ class HandGestureDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    # ── 增强版Augmentation (applied consistently to rgb, depth, mask) ──────────
-    # def _augment(self, rgb_pil, depth_pil, mask_pil):
-    # # 随机水平翻转
-    #     if random.random() > 0.5:
-    #         rgb_pil   = TF.hflip(rgb_pil)
-    #         depth_pil = TF.hflip(depth_pil)
-    #         mask_pil  = TF.hflip(mask_pil)
-
-    #     # 随机旋转 ±15°
-    #     angle = random.uniform(-15, 15)
-    #     rgb_pil   = TF.rotate(rgb_pil,   angle)
-    #     depth_pil = TF.rotate(depth_pil, angle)
-    #     mask_pil  = TF.rotate(mask_pil,  angle)
-
-    #     # ColorJitter只加在RGB上
-    #     jitter = T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.05)
-    #     rgb_pil = jitter(rgb_pil)
-
-    #     return rgb_pil, depth_pil, mask_pil
-   
-#VER1-----只有jitter的-------------the basic avalible augmentation is implemented above, you can uncomment it to use.------------------
+    # ── Augmentation (applied consistently to rgb, depth, mask) ──────────
     def _augment(self, rgb_pil, depth_pil, mask_pil):
-    
-   
+        # ColorJitter applied to RGB only
         jitter = T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.05)
         rgb_pil = jitter(rgb_pil)
-
         return rgb_pil, depth_pil, mask_pil
-    
-# #VER2 ------带旋转的------------the advanced augmentation is implemented below, you can uncomment it to use.------------------
-#     def _augment(self, rgb_pil, depth_pil, mask_pil):
 
-#         # 旋转是安全的，不改变手的左右手性
-#         angle = random.uniform(-15, 15)
-#         rgb_pil   = TF.rotate(rgb_pil,   angle)
-#         depth_pil = TF.rotate(depth_pil, angle)
-#         mask_pil  = TF.rotate(mask_pil,  angle)
-
-#         # ColorJitter只加在RGB上
-#         jitter = T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.05)
-#         rgb_pil = jitter(rgb_pil)
-
-#         return rgb_pil, depth_pil, mask_pil
     # ── Main loader ───────────────────────────────────────────────────────
     def __getitem__(self, idx):
         s = self.samples[idx]
@@ -240,7 +198,6 @@ class HandGestureDataset(Dataset):
         if self.use_depth and s['depth_path'] and os.path.exists(s['depth_path']):
             depth_pil = Image.open(s['depth_path']).convert('L')   # grayscale
         else:
-            # Fallback: black depth image
             depth_pil = Image.fromarray(np.zeros((H, W), dtype=np.uint8), mode='L')
 
         # ── Mask ───────────────────────────────────────────────────────
@@ -267,17 +224,17 @@ class HandGestureDataset(Dataset):
 
         # ── depth_raw (.npy) ───────────────────────────────────────────
         if self.use_depth and s['depraw_path'] and os.path.exists(s['depraw_path']):
-            raw_np  = np.load(s['depraw_path']).astype(np.float32)  # H x W, mm values
-            # Resize to target size
-            raw_pil = Image.fromarray(raw_np).resize((W, H), Image.BILINEAR)
-            raw_np  = np.array(raw_pil, dtype=np.float32)
-            depraw_t = torch.from_numpy(raw_np).unsqueeze(0)        # (1, H, W)
+            raw_np   = np.load(s['depraw_path']).astype(np.float32)  # H x W, mm values
+            raw_pil  = Image.fromarray(raw_np).resize((W, H), Image.BILINEAR)
+            raw_np   = np.array(raw_pil, dtype=np.float32)
+            depraw_t = torch.from_numpy(raw_np).unsqueeze(0)         # (1, H, W)
         else:
             depraw_t = torch.zeros(1, H, W, dtype=torch.float32)
 
         # ── Bounding box from mask ─────────────────────────────────────
-        bbox = mask_to_bbox(mask_np, H, W)    # [x1,y1,x2,y2] normalised to [0,1]
-        bbox_t = torch.tensor(bbox, dtype=torch.float32)  # (4,)
+        bbox   = mask_to_bbox(mask_np, H, W)                          # [x1,y1,x2,y2] normalised
+        bbox_t = torch.tensor(bbox, dtype=torch.float32)              # (4,)
+
         # ── Normalise RGB (ImageNet mean/std) ──────────────────────────
         normalize = T.Normalize(mean=[0.485, 0.456, 0.406],
                                 std =[0.229, 0.224, 0.225])
@@ -325,6 +282,8 @@ def get_dataloaders(
 ):
     """
     Convenience function that returns train and val DataLoaders.
+    Two separate dataset instances are created so that augmentation is applied
+    to training data only. The same random split indices are reused for both.
 
     Args:
         root_dir   : path to dataset/ folder
@@ -338,41 +297,32 @@ def get_dataloaders(
     Returns:
         train_loader, val_loader
     """
-    # 修改 get_dataloaders 函数中的切分逻辑
-    n = len(train_dataset)
+    # Build indices from the full dataset
+    full_dataset = HandGestureDataset(
+        root_dir=root_dir, use_depth=use_depth,
+        keyframes_only=True, augment=False, img_size=img_size,
+    )
+    n = len(full_dataset)
     indices = list(range(n))
     random.seed(seed)
     random.shuffle(indices)
     split = int(n * (1 - val_ratio))
-    
-    # 纯手动提取索引
     train_idx, val_idx = indices[:split], indices[split:]
 
-    train_subset = torch.utils.data.Subset(train_dataset, train_idx)
-    # 用关闭了 augment 的 dataset，但是用提取出来的 val_idx
-    val_subset = torch.utils.data.Subset(val_dataset, val_idx) 
-
-    train_loader = DataLoader(
-        train_subset,
-        batch_size=batch_size,
-        shuffle=True,  # 这里的 shuffle 是 batch 层面的，没问题
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True,
+    # Train dataset with augmentation; val dataset without
+    train_dataset = HandGestureDataset(
+        root_dir=root_dir, use_depth=use_depth,
+        keyframes_only=True, augment=True, img_size=img_size,
     )
-    val_loader = DataLoader(
-        val_subset,    # 这里传包裹好的 Subset
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=True,
+    val_dataset = HandGestureDataset(
+        root_dir=root_dir, use_depth=use_depth,
+        keyframes_only=True, augment=False, img_size=img_size,
     )
 
-    train_subset, val_subset = split_dataset(train_dataset, val_ratio, seed)
-    # Use the same split indices on val_dataset (no augment)
     from torch.utils.data import Subset
-    _, val_indices = split_dataset(val_dataset, val_ratio, seed)
-    # Re-use the same indices
+    train_subset = Subset(train_dataset, train_idx)
+    val_subset   = Subset(val_dataset,   val_idx)
+
     train_loader = DataLoader(
         train_subset,
         batch_size=batch_size,
@@ -382,7 +332,7 @@ def get_dataloaders(
         drop_last=True,
     )
     val_loader = DataLoader(
-        val_indices,
+        val_subset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
@@ -390,7 +340,7 @@ def get_dataloaders(
     )
 
     print(f"[DataLoader] Train: {len(train_subset)} samples | "
-          f"Val: {len(val_indices)} samples")
+          f"Val: {len(val_subset)} samples")
 
     return train_loader, val_loader
 
@@ -424,7 +374,6 @@ if __name__ == '__main__':
         print(f"frame_id        : {sample['frame_id']}")
 
         print("\n=== Testing DataLoader ===")
-        # ---- Step1: label / gesture consistency check ----
         from collections import Counter, defaultdict
 
         print("\n=== Label distribution (first pass) ===")
@@ -447,6 +396,7 @@ if __name__ == '__main__':
         for g, labs in per_gesture.items():
             if len(labs) != 1:
                 print("Gesture has multiple labels:", g, labs)
+
         loader = DataLoader(ds, batch_size=4, shuffle=True, num_workers=0)
         batch = next(iter(loader))
         print(f"Batch rgb shape : {batch['rgb'].shape}")
